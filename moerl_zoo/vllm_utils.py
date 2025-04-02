@@ -140,7 +140,7 @@ if importlib.util.find_spec("vllm") is not None:
     pass
 
     def patch_vllm_bitsandbytes():
-        # All Unsloth Zoo code licensed under LGPLv3
+        # MoERL-specific modifications for BitsAndBytes integration
         import vllm.model_executor.layers.quantization.bitsandbytes
         vllm.model_executor.layers.quantization.bitsandbytes.is_layer_skipped_bnb = is_layer_skipped_bnb
         vllm.model_executor.layers.quantization.bitsandbytes.BitsAndBytesLinearMethod._apply_4bit_weight = _apply_4bit_weight
@@ -152,10 +152,9 @@ if importlib.util.find_spec("vllm") is not None:
         vllm_config_logger.addFilter(HideLoggingMessage("is not fully optimized"))
         vllm_config_logger.addFilter(HideLoggingMessage("not set"))
         del vllm_config_logger
-    pass
 
     def patch_vllm_compute_dtype(dtype = torch.float16):
-        # All Unsloth Zoo code licensed under LGPLv3
+        # MoERL-specific modifications for BitsAndBytes dtype configuration
         # vLLM defaults to using the model config file's compute_dtype
         # We shall fix it dynamically!
         import vllm.model_executor.layers.quantization.bitsandbytes
@@ -163,30 +162,26 @@ if importlib.util.find_spec("vllm") is not None:
 
         dtype = str(dtype)
         if dtype.startswith("torch."): dtype = dtype[len("torch."):]
-        os.environ["UNSLOTH_bnb_4bit_compute_dtype"] = dtype
+        os.environ["MOERL_bnb_4bit_compute_dtype"] = dtype
 
         class BitsAndBytesConfig(
             vllm.model_executor.layers.quantization.bitsandbytes.BitsAndBytesConfig
         ):
-            # All Unsloth Zoo code licensed under LGPLv3
+            # MoERL-specific changes for dtype handling
             def __init__(self, *args, **kwargs):
-                dtype = os.environ.get("UNSLOTH_bnb_4bit_compute_dtype", kwargs["bnb_4bit_compute_dtype"])
+                dtype = os.environ.get("MOERL_bnb_4bit_compute_dtype", kwargs["bnb_4bit_compute_dtype"])
                 kwargs["bnb_4bit_compute_dtype"] = dtype
-                print(f"Unsloth: vLLM Bitsandbytes config using kwargs = {kwargs}")
+                print(f"MoERL: vLLM Bitsandbytes config using kwargs = {kwargs}")
                 super().__init__(*args, **kwargs)
-            pass
-        pass
-
+            
         vllm.model_executor.layers.quantization.bitsandbytes.BitsAndBytesConfig = BitsAndBytesConfig
         return old_config
-    pass
 
     def unpatch_vllm_compute_dtype(old_config):
-        # All Unsloth Zoo code licensed under LGPLv3
+        # MoERL-specific changes for dtype handling
         import vllm.model_executor.layers.quantization.bitsandbytes
         vllm.model_executor.layers.quantization.bitsandbytes.BitsAndBytesConfig = old_config
-        del os.environ["UNSLOTH_bnb_4bit_compute_dtype"]
-    pass
+        del os.environ["MOERL_bnb_4bit_compute_dtype"]
 
     def patch_vllm_lora_tokenizer():
         import vllm.transformers_utils.tokenizer
@@ -288,7 +283,7 @@ if importlib.util.find_spec("bitsandbytes") is not None:
             code=qs_dict["quant_map"].to(device),
             # dtype=getattr(torch, qs_dict["dtype"]),
             # Patch over the compute dtype for vLLM
-            dtype=getattr(torch, os.environ.get("UNSLOTH_bnb_4bit_compute_dtype", qs_dict["dtype"])),
+            dtype=getattr(torch, os.environ.get("MOERL_bnb_4bit_compute_dtype", qs_dict["dtype"])),
             shape=torch.Size(qs_dict["shape"]) if qs_dict["shape"] is not None else None,
             offset=offset,
             state2=state2,
@@ -300,7 +295,7 @@ if importlib.util.find_spec("bitsandbytes") is not None:
     class Linear4bit(bitsandbytes.nn.modules.Linear4bit):
         # All Unsloth Zoo code licensed under LGPLv3
         def __init__(self, *args, **kwargs):
-            compute_dtype = os.environ.get("UNSLOTH_bnb_4bit_compute_dtype", None)
+            compute_dtype = os.environ.get("MOERL_bnb_4bit_compute_dtype", None)
             if compute_dtype is not None:
                 compute_dtype = getattr(torch, compute_dtype)
                 kwargs["compute_dtype"] = compute_dtype
@@ -318,12 +313,12 @@ if importlib.util.find_spec("bitsandbytes") is not None:
         # All Unsloth Zoo code licensed under LGPLv3
         dtype = str(dtype)
         if dtype.startswith("torch."): dtype = dtype[len("torch."):]
-        os.environ["UNSLOTH_bnb_4bit_compute_dtype"] = dtype
+        os.environ["MOERL_bnb_4bit_compute_dtype"] = dtype
         return
     pass
 
     def unpatch_bitsandbytes_compute_dtype():
-        del os.environ["UNSLOTH_bnb_4bit_compute_dtype"]
+        del os.environ["MOERL_bnb_4bit_compute_dtype"]
         return
     pass
 else:
@@ -709,111 +704,250 @@ def convert_vllm_to_huggingface(quant_state_dict, config, dtype = torch.float16,
     return new_model
 pass
 
+def _compute_matrix_size(mat_row, mat_col, lora_rank=None):
+    """
+    Compute the size of a matrix.
+    If lora_rank is None, return the size of the matrix.
+    Otherwise, return the size of the matrix with LoRA.
+    Args:
+        mat_row (int): The number of rows of the matrix.
+        mat_col (int): The number of columns of the matrix.
+        lora_rank (int): The rank of the LoRA matrix.
+    Returns:
+        int: The size of the matrix.
+    """
+    if lora_rank is None:
+        return mat_row * mat_col
+    else:
+        return mat_row * lora_rank + lora_rank * mat_col
 
 def approximate_vllm_memory_usage(
-    config, 
-    max_seq_length = 2048,
-    gpu_memory_utilization = 0.8,
-    enable_lora = True,
-    max_lora_rank = 16,
-    max_loras = 1,
-    float8_kv_cache = False,
-    account_for_gradients = True,
-):
-    # All Unsloth Zoo code licensed under LGPLv3
-    # Gets approximate max model length and max num sequences
-    load_in_4bit = "quantization_config" in config
-    free_memory, total_memory = torch.cuda.mem_get_info()
-    free_memory = gpu_memory_utilization * free_memory
+    model_config,
+    max_seq_length,
+    is_mla_attention          = True,   # Whether to use Multi-Linear Attention (MLA)
+    include_lora_memory       = True,   # Whether to calculate memory usage for LoRA adapters
+    max_lora_rank             = 16,     # Assumed maximum rank for LoRA adapters
+    kv_cache_dtype            = "auto", # kv cache dtype
+):  
+    """
+    Estimate the memory required for vLLM inference.
+    Total Estimated Memory ≈ Model Weights + Lora Model Weights + Peak Activation + \
+                             Optimizer State + KV Cache + Workspace/Overhead
 
-    vocab_size = config.vocab_size
-    hd = config.hidden_size
-    context_length = config.max_position_embeddings
-    mlp_size = config.intermediate_size
-    n_layers = config.num_hidden_layers
-    n_kv_heads = getattr(config, "num_key_value_heads", 1)
-    n_heads    = getattr(config, "num_attention_heads", 1)
-    # Group Query Attention
-    kv_size = hd // n_heads * n_kv_heads
+                      GPU Memory
+            ┌──────────────────────────────┐
+            │                              │
+            │        Model Weights         │
+            │                              │
+            ├──────────────────────────────┤
+            │         LoRA Weights         │
+            ├──────────────────────────────┤
+            │         Activations          │
+            ├──────────────────────────────┤
+            │       Optimizer State        │
+            ├──────────────────────────────┤
+            │           KV Cache           │
+            ├──────────────────────────────┤
+            │      Workspace/Overhead      │
+            └──────────────────────────────┘
+    Args:
+        model_config (PretrainedConfig): The model configuration.
+        max_seq_length (int): The maximum sequence length.
+        is_mla_attention (bool): Whether to use Multi-Linear Attention (MLA).
+        include_lora_memory (bool): Whether to calculate memory usage for LoRA adapters.
+        max_lora_rank (int): Assumed maximum rank for LoRA adapters.
+        kv_cache_dtype (str): kv cache dtype, ["auto", "fp8",].
+    """
+    mem_avail, mem_total = torch.cuda.mem_get_info()
 
-    # Modules
-    qkvo = hd + kv_size + kv_size + hd
-    qkvo = qkvo * hd
-    mlp  = (hd * mlp_size) * 3
-    layernorms = 2 * hd
-    embed_tokens = vocab_size * hd
-    lm_head = 0 if getattr(config, "tie_word_embeddings", True) else vocab_size * hd
+    # 1. Compute the memory occupied by the model weights & LoRA weights (# of elements)
+    model_weights_size = 0
+    lora_model_weights_size = 0
+    is_quantized = getattr(model_config, "quantization_config", False)
+    n_layers = model_config.num_hidden_layers
 
-    # LoRA modules on all QKVO, MLP
-    qkvo_A = hd * max_lora_rank * 4
-    qkvo_B = max_lora_rank * (hd + kv_size + kv_size + hd)
-    mlp_A  = hd * max_lora_rank * 2 + mlp_size * max_lora_rank
-    mlp_B  = max_lora_rank * (mlp_size + mlp_size) + max_lora_rank * hd
-    lora_elements = qkvo_A + qkvo_B + mlp_A + mlp_B
-    lora_elements = lora_elements * max_loras
-    # 2 bytes = float16 for LoRA
-    lora_elements = lora_elements*n_layers * 2
-    if not enable_lora: lora_elements = 0
+    vocab_size = model_config.vocab_size
+    hidden_size = model_config.hidden_size
+    ## 1.1 Embeddings
+    model_weights_size = _compute_matrix_size(vocab_size, hidden_size)
+    ## 1.2 Compute the memory occupied by the Attention
+    intermediate_size = model_config.intermediate_size 
+    
+    n_q_heads = getattr(model_config, "num_attention_heads", 1)
+    n_kv_heads = getattr(model_config, "num_key_value_heads", n_q_heads)  # for example, qwen-14b does not have num_key_value_heads
+    kv_size = hidden_size // n_q_heads * n_kv_heads
 
-    # Get activation and gradients for LoRA
-    # 8bit Adam most likely * 2 for momentum, variance
-    gradient_lora_elements  = lora_elements + lora_elements
-    # Parameter left in float32
-    parameter_lora_elements = lora_elements*4
+    if is_mla_attention:  # MLA
+        qk_nope_head_dim = getattr(model_config, "qk_nope_head_dim", 1)
+        qk_rope_head_dim = getattr(model_config, "qk_rope_head_dim", 1)
+        q_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        kv_lora_rank = getattr(model_config, "kv_lora_rank", 1)
+        q_lora_rank = getattr(model_config, "q_lora_rank", 1)
+        v_head_dim = getattr(model_config, "v_head_dim", 1)
+        if q_lora_rank is None:
+            q_proj = _compute_matrix_size(hidden_size, q_head_dim * n_q_heads)
+            lora_q_proj = _compute_matrix_size(hidden_size, q_head_dim * n_q_heads, max_lora_rank)
+        else:
+            q_proj = _compute_matrix_size(hidden_size, n_q_heads * q_head_dim, q_lora_rank)
+            lora_q_proj = _compute_matrix_size(hidden_size, q_lora_rank, max_lora_rank)
+            lora_q_proj = lora_q_proj + _compute_matrix_size(q_lora_rank, n_q_heads * q_head_dim, max_lora_rank)
+        
+        kv_a_proj_with_mqa = _compute_matrix_size(hidden_size, kv_lora_rank + qk_rope_head_dim)
+        lora_kv_a_proj_with_mqa = _compute_matrix_size(hidden_size, kv_lora_rank + qk_rope_head_dim, max_lora_rank)
 
-    # Activation memory - assume bsz=2
-    bsz = 2
-    activation_qkv  = max_seq_length * bsz * (hd + kv_size + kv_size)
-    residual_memory = (max_seq_length * bsz)*2
-    activation_mlp  = max_seq_length * bsz * (mlp_size + mlp_size)
-    weights = mlp_size * hd
-    maximum_activation = \
-        activation_qkv + residual_memory + activation_mlp + weights
-    # 2 bytes with 25% extra just in case
-    maximum_activation = (maximum_activation*1.25) * 2
-    if not account_for_gradients: maximum_activation = 0
-    # Minus for activations
-    if total_memory - free_memory < maximum_activation:
-        free_memory = total_memory - maximum_activation
-    actual_gpu_memory_utilization = free_memory / total_memory
+        kv_b_proj = _compute_matrix_size(kv_lora_rank, n_q_heads * (q_head_dim - qk_rope_head_dim + v_head_dim))
+        lora_kv_b_proj = _compute_matrix_size(kv_lora_rank, n_q_heads * (q_head_dim - qk_rope_head_dim + v_head_dim), max_lora_rank)
+        
+        o_proj = _compute_matrix_size(v_head_dim * n_q_heads, hidden_size)
+        lora_o_proj = _compute_matrix_size(v_head_dim * n_q_heads, hidden_size, max_lora_rank)
+        
+        mla_weights_size = q_proj + kv_a_proj_with_mqa + kv_b_proj + o_proj
+        lora_mla_weights_size = lora_q_proj + lora_kv_a_proj_with_mqa + lora_kv_b_proj + lora_o_proj
+        peak_qkv_activation = (q_head_dim * n_q_heads) + (kv_lora_rank + qk_rope_head_dim) + \
+            (n_q_heads * (q_head_dim - qk_rope_head_dim + v_head_dim))  # qkv peak activation for one layer
 
-    # 2 bytes = float16
-    total_quantizable_elements = (qkvo + mlp)*n_layers * 2
-    total_float16_elements     = (layernorms + embed_tokens + lm_head)*2
-    factor = 16/5 if load_in_4bit else 1 # Should be 4.5 but use 5
-    bytes_for_model = \
-        total_quantizable_elements / factor + total_float16_elements + lora_elements
+        mla_weights_size = mla_weights_size * n_layers
+        lora_mla_weights_size = lora_mla_weights_size * n_layers
 
-    # KV cache size (float16 is 2 bytes. float8 is 1.25 bytes)
-    float_bytes = 1.25 if float8_kv_cache else 2
-    kv_elements = (kv_size * 2 * n_layers) * float_bytes
-    memory_left_for_kv_cache = free_memory - bytes_for_model
-    if memory_left_for_kv_cache <= 0: memory_left_for_kv_cache = 0
+        model_weights_size += mla_weights_size
+        lora_model_weights_size += lora_mla_weights_size
+    else:  # MHA/GQA
+        mha_weights_size = _compute_matrix_size(hidden_size, hidden_size + kv_size + kv_size + hidden_size)
+        lora_mha_weights_size = _compute_matrix_size(hidden_size, hidden_size + kv_size + kv_size + hidden_size, max_lora_rank)
+        peak_qkv_activation = hidden_size + kv_size + kv_size + hidden_size  # qkv peak activation for one layer
+
+        mha_weights_size = mha_weights_size * n_layers
+        lora_mha_weights_size = lora_mha_weights_size * n_layers
+
+        model_weights_size += mha_weights_size
+        lora_model_weights_size += lora_mha_weights_size
+
+    # 1.3 Compute the memory occupied by the MLP/MoE
+    if "num_experts_per_tok" not in model_config:
+        mlp_weights_size = _compute_matrix_size(hidden_size, intermediate_size) * 3 * n_layers  # Gate, Up, Down
+        lora_mlp_weights_size = _compute_matrix_size(hidden_size, intermediate_size, max_lora_rank) * 3 * n_layers
+        peak_mlp_activation = intermediate_size * 2  # [Gate, Up] for one layer
+
+    if "moe_intermediate_size" in model_config:  # fine-grained MoE
+        moe_intermediate_size = model_config.moe_intermediate_size
+        num_experts_per_tok = getattr(model_config, "num_experts_per_tok", 1)
+        if "n_shared_experts" in model_config:  # e.g. DeepSeek-MoE, shared experts + routed experts
+            n_shared_experts = model_config.n_shared_experts
+            n_routed_experts = model_config.n_routed_experts
+            first_k_dense_replace = model_config.first_k_dense_replace
+            first_k_mlp_weights_size = _compute_matrix_size(hidden_size, intermediate_size) * 3 * first_k_dense_replace
+            lora_first_k_mlp_weights_size = _compute_matrix_size(hidden_size, intermediate_size, max_lora_rank) * 3 * first_k_dense_replace
+            
+            gate_weights_size = _compute_matrix_size(n_routed_experts, hidden_size)   # No LoRA on gate
+            mlp_weights_size = gate_weights_size + _compute_matrix_size(
+                (n_shared_experts + n_routed_experts) * moe_intermediate_size, hidden_size) * 3
+            lora_mlp_weights_size = _compute_matrix_size(
+                (n_shared_experts + n_routed_experts) * moe_intermediate_size, hidden_size, max_lora_rank) * 3
+            peak_mlp_activation = (n_shared_experts + num_experts_per_tok) * moe_intermediate_size * 2  # [Gate, Up] for one layer
+            
+            # multiply num_moe_layers = num_layers - first_k_dense_replace
+            mlp_weights_size = _compute_matrix_size(mlp_weights_size, n_layers - first_k_dense_replace)
+            lora_mlp_weights_size = _compute_matrix_size(lora_mlp_weights_size, n_layers - first_k_dense_replace)
+            
+            mlp_weights_size += first_k_mlp_weights_size
+            lora_mlp_weights_size += lora_first_k_mlp_weights_size
+        elif "num_experts" in model_config:  # e.g. qwen-moe, shared experts + routed experts
+            num_experts = model_config.num_experts
+            shared_expert_intermediate_size = model_config.shared_expert_intermediate_size
+            gate_weights_size = _compute_matrix_size(num_experts, hidden_size)
+            mlp_weights_size = gate_weights_size + _compute_matrix_size(hidden_size, shared_expert_intermediate_size) * 3 + \
+                _compute_matrix_size(num_experts * moe_intermediate_size, hidden_size) * 3
+            lora_mlp_weights_size = _compute_matrix_size(hidden_size, shared_expert_intermediate_size, max_lora_rank) * 3 + \
+                _compute_matrix_size(num_experts * moe_intermediate_size, hidden_size, max_lora_rank) * 3
+            peak_mlp_activation = (shared_expert_intermediate_size + num_experts_per_tok * moe_intermediate_size) * 2  # [Gate, Up] for one layer
+
+            mlp_weights_size = mlp_weights_size * n_layers
+            lora_mlp_weights_size = lora_mlp_weights_size * n_layers
+        else:
+            raise ValueError(f"\033[91mMoERL: Unknown MoE structure: {model_config}\033[0m")
+    elif "num_local_experts" in model_config:  # e.g. mixtral-moe, phi-3.5-moe, grin-moe. no shared experts, coarse-grained MoE
+            num_local_experts = model_config.num_local_experts
+            num_experts_per_tok = getattr(model_config, "num_experts_per_tok", 1)
+            gate_weights_size = _compute_matrix_size(num_local_experts, hidden_size)
+            mlp_weights_size = gate_weights_size + _compute_matrix_size(num_local_experts * hidden_size, intermediate_size) * 3
+            lora_mlp_weights_size = _compute_matrix_size(num_local_experts * hidden_size, intermediate_size, max_lora_rank) * 3
+            peak_mlp_activation = num_experts_per_tok * intermediate_size * 2  # [Gate, Up] for one layer
+
+            mlp_weights_size = mlp_weights_size * n_layers
+            lora_mlp_weights_size = lora_mlp_weights_size * n_layers
+    else:
+        raise ValueError(f"\033[91mMoERL: Unknown MoE structure: {model_config}\033[0m")
+
+    model_weights_size += mlp_weights_size
+    lora_model_weights_size += lora_mlp_weights_size
+    optimizer_state_size = lora_model_weights_size * 2  # 2x for optimizer state, TODO: embedding and lm_head?
+    lora_model_weights_size += optimizer_state_size  # combine lora weights and optimizer state
+
+    ## 1.4 Compute the memory occupied by the lm_head
+    lm_head = 0 if getattr(model_config, "tie_word_embeddings", True) else vocab_size * hidden_size
+    model_weights_size += lm_head
+
+    if not include_lora_memory:  # Exclude LoRA memory
+        lora_model_weights_size = 0
+    
+    # 2. Compute the peak memory occupied by the activations (# of elements for one layer)
+    # activation ~ max_seq_length * bsz * (peak_qkv_activation + peak_mlp_activation)
+    batch_size = 2
+    peak_qkv_activation = max_seq_length * batch_size * peak_qkv_activation
+    peak_mlp_activation = max_seq_length * batch_size * peak_mlp_activation
+    
+    # 3. Convert to bytes: float16/bfloat16 = 2 bytes, fp8 = 1 bytes, int4 = 0.5 bytes
+    peak_activation_bytes = (peak_qkv_activation + peak_mlp_activation) * 2  # float16/bfloat16
+    peak_activation_bytes = peak_activation_bytes * 1.3  # 30% extra, maybe too loose
+
+    # adjust mem_avail to account for peak_activation_bytes
+    if mem_total - mem_avail < peak_activation_bytes:
+        mem_avail = mem_total - peak_activation_bytes
+    approx_gpu_memory_utilization_for_vllm = mem_avail / mem_total  # gpu_memory_utilization arg for vllm
+
+    lora_model_weights_bytes = lora_model_weights_size * 2  # float16/bfloat16
+    # Note: Assume is_quantized is NF4/Int4 only, not support int8/fp8
+    model_weights_bytes = model_weights_size // 2 if is_quantized else model_weights_size * 2
+    # combine model weights, lora weights, and optimizer state
+    model_weights_bytes = model_weights_bytes + lora_model_weights_bytes
+
+    # vllm kv cache size
+    memory_left_for_kv_cache = mem_avail - model_weights_bytes  # GPU memory - model weights - lora weights - optimizer state - activation
+    if memory_left_for_kv_cache <= 0:
+        memory_left_for_kv_cache = 0
+
+    if kv_cache_dtype == "fp8":
+        float_bytes = 1  # fp8 is 1 byte
+    else:
+        float_bytes = 2  # float16/bfloat16 is 2 bytes
+
+    if is_mla_attention:
+        kv_bytes_per_token = (qk_rope_head_dim + kv_lora_rank) * n_layers * float_bytes
+    else:
+        kv_bytes_per_token = (kv_size * 2) * n_layers * float_bytes
 
     # Approx maximum # of KV cache elements
-    max_num_batched_tokens = int(0.95*(memory_left_for_kv_cache / kv_elements))
-    # Round by 256
-    max_num_batched_tokens = (max_num_batched_tokens // 256) * 256
-    # Assuming all requests output max_seq_length, get theoretical max requests
-    approx_max_num_seqs = int(max_num_batched_tokens / max_seq_length)
+    approx_max_num_batched_tokens = int(memory_left_for_kv_cache / kv_bytes_per_token * 0.9)
+    approx_max_num_batched_tokens = (approx_max_num_batched_tokens // 256) * 256
+    approx_max_num_seqs = int(approx_max_num_batched_tokens / max_seq_length)
 
     # GB for KV cache
-    memory_left_for_kv_cache_gb = memory_left_for_kv_cache / 1024 / 1024 / 1024
+    approx_memory_left_for_kv_cache_gb = memory_left_for_kv_cache / 1024 / 1024 / 1024
 
-    return \
-        max_num_batched_tokens, approx_max_num_seqs, \
-        actual_gpu_memory_utilization, memory_left_for_kv_cache_gb
-pass
+    return approx_max_num_batched_tokens, approx_max_num_seqs, \
+        approx_gpu_memory_utilization_for_vllm, approx_memory_left_for_kv_cache_gb
 
 
 def load_vllm(
     model_name             : str   = "unsloth/Llama-3.2-3B-Instruct-unsloth-bnb-4bit",
-    config                 = None,
+    model_config                   = None,
     gpu_memory_utilization : float = 0.8,
     max_seq_length         : int   = 8192,
     dtype                  : torch.dtype = None,
+    is_mla_attention       : bool  = True,  # is MLA attention in model
     training               : bool = True,
-    float8_kv_cache        : bool = False,
+    kv_cache_dtype         : str = "auto",
+    calculate_kv_scales    : bool = True,  # This enables dynamic calculation of k_scale and v_scale when kv-cache-dtype is fp8. If calculate-kv-scales is false, the scales will be loaded from the model checkpoint if available. Otherwise, the scales will default to 1.0.
     random_state           : int  = 0,
     enable_lora            : bool = True,
     max_lora_rank          : int  = 16,
@@ -827,64 +961,75 @@ def load_vllm(
     conservativeness       : float = 1.0, # For low VRAM devices, scale batches, num_seqs
     max_logprobs           : int  = 0,
     use_bitsandbytes       : bool = True,
+    max_num_batched_tokens : int  = 2048,
 ):
-    # All Unsloth Zoo code licensed under LGPLv3
     # Create vLLM instance
-    assert(config is not None)
+    assert(model_config is not None)
     assert(type(use_bitsandbytes) is bool)
     assert(conservativeness >= 0.0 and conservativeness <= 1.0)
-
     major_version, minor_version = torch.cuda.get_device_capability()
-    if major_version < 7: raise NotImplementedError("Unsloth: Your GPU is too old!")
+    assert(major_version >= 7, f"\033[91mMoERL: vLLM requires CUDA compute capability 7.0 or higher! \
+                                 Your GPU SM is {major_version}.{minor_version}.\033[0m")
 
-    # Float8 KV cache only works for 8.0 or higher
-    if float8_kv_cache and major_version < 8:
-        raise NotImplementedError("Unsloth: Your GPU is too old for float8 KV cache! Set it to False.")
+    # Suggest correct dtype
+    if major_version >= 8 and dtype == torch.float16: 
+        # DO NOT CHANGE dtype, just suggest
+        print(f"\033[94mMoERL: Maybe you can switch to dtype = torch.bfloat16 since your GPU supports it.\033[0m")
+    elif dtype == torch.bfloat16 and major_version < 8:
+        print(f"\033[91mMoERL: We switched to dtype = torch.float16 since your GPU does not support torch.bfloat16.\033[0m")
+        dtype = torch.float16
+    elif dtype is None:
+        if major_version >= 8:
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+        print(f"\033[94mMoERL: Using dtype = {dtype} for vLLM.\033[0m")
+    elif dtype == torch.float16 or dtype == torch.bfloat16: pass
+    else:
+        raise NotImplementedError(f"\033[91mMoERL: We do not support dtype = {dtype} yet!\033[0m")
+    
+    approx_max_num_batched_tokens, approx_max_num_seqs, \
+    approx_gpu_memory_utilization_for_vllm, approx_memory_left_for_kv_cache_gb = \
+        approximate_vllm_memory_usage(
+            model_config, 
+            max_seq_length = max_seq_length,
+            is_mla_attention = is_mla_attention,
+            include_lora_memory = enable_lora,
+            max_lora_rank = max_lora_rank,
+            kv_cache_dtype = kv_cache_dtype,
+        )
+    # max_num_batched_tokens, approx_max_num_seqs, \
+    # actual_gpu_memory_utilization, memory_left_for_kv_cache_gb = \
+    # approximate_vllm_memory_usage(
+    #     model_config, 
+    #     max_seq_length = max_seq_length,
+    #     gpu_memory_utilization = gpu_memory_utilization,
+    #     include_lora_memory = enable_lora,
+    #     max_lora_rank = max_lora_rank,
+    #     max_loras = max_loras,
+    #     float8_kv_cache = float8_kv_cache,
+    #     account_for_gradients = training,
+    # )
 
-    max_num_batched_tokens, approx_max_num_seqs, \
-    actual_gpu_memory_utilization, memory_left_for_kv_cache_gb = \
-    approximate_vllm_memory_usage(
-        config, 
-        max_seq_length = max_seq_length,
-        gpu_memory_utilization = gpu_memory_utilization,
-        enable_lora = enable_lora,
-        max_lora_rank = max_lora_rank,
-        max_loras = max_loras,
-        float8_kv_cache = float8_kv_cache,
-        account_for_gradients = training,
-    )
-
-    # Check max_num_batched_tokens for max_seq_length
-    # Must be >= max_num_batched_tokens
-    if max_num_batched_tokens <= 0:
-        max_seq_length = 256
-        max_num_batched_tokens = 256
+    # Check approx_max_num_batched_tokens for max_seq_length
+    # Must be >= approx_max_num_batched_tokens
+    if approx_max_num_batched_tokens <= 0:
+        print(
+            f"\033[91mMoERL: Adjusting max_seq_length {max_seq_length} to 256 due to limited GPU memory.\033[0m"
+        )
+        max_seq_length = 256  # TODO 256 is too hardcoded, maybe max_seq_length // 2
+        max_num_batched_tokens = 256  # TODO 256 is too hardcoded, maybe max_seq_length // 2
 
     if max_num_batched_tokens <= max_seq_length:
         print(
-            f"Unsloth: Your GPU cannot handle sequence lengths of {max_seq_length} due to limited GPU memory.\n"\
-            f"Unsloth: Your GPU can only handle approximately the maximum sequence length of {max_seq_length}."
+            f"\033[91mMoERL: Adjusting max_seq_length {max_seq_length} to {max_num_batched_tokens} due to limited GPU memory.\033[0m"
         )
         max_seq_length = max_num_batched_tokens
-    pass
-
-    # Get correct dtype
-    if major_version >= 8: _dtype = torch.bfloat16
-    else: _dtype = torch.float16
-    if dtype == torch.bfloat16 and _dtype == torch.float16:
-        print("Unsloth: We switched to dtype = torch.float16 since your GPU does not support torch.bfloat16")
-        dtype = torch.float16
-    elif dtype is None:
-        dtype = _dtype
-        print(f"Unsloth: Using dtype = {dtype} for vLLM.")
-    elif dtype == torch.float16 or dtype == torch.bfloat16: pass
-    else:
-        raise NotImplementedError(f"Unsloth: We do not support dtype = {dtype} yet!")
 
     free_memory, total_memory = torch.cuda.mem_get_info()
     total_memory_gb = round(total_memory / 1024 / 1024 / 1024, 2)
     use_bitsandbytes = use_bitsandbytes or \
-        model_name.lower().endswith("-bnb-4bit")
+        model_name.lower().endswith("-bnb-4bit")  # Be careful with model name
 
     # Fix up vLLM compute_dtype for bitsandbytes
     BitsAndBytesConfig = patch_vllm_compute_dtype(dtype)
@@ -909,9 +1054,8 @@ def load_vllm(
 
     # Prefix Caching fails for V100, Titan X CUDA Compute Capability 7.0
     # See https://github.com/huggingface/trl/issues/2798
-    major_version, minor_version = torch.cuda.get_device_capability()
     if (major_version < 7) or (major_version == 7 and minor_version < 5):
-        print("Unsloth: Your GPU does not support prefix caching - will disable!")
+        print("\033[91mMoERL: Your GPU does not support prefix caching - will disable!\033[0m")
         enable_prefix_caching = False
     pass
 
@@ -928,29 +1072,30 @@ def load_vllm(
 
     # Default vLLM max_num_seqs is 256
     approx_max_num_seqs = 256
-    if   memory_left_for_kv_cache_gb <=  2: approx_max_num_seqs = 128 # - 32
-    elif memory_left_for_kv_cache_gb <=  4: approx_max_num_seqs = 160 # - 32
-    elif memory_left_for_kv_cache_gb <=  8: approx_max_num_seqs = 192 # - 32
-    elif memory_left_for_kv_cache_gb <= 12: approx_max_num_seqs = 224 # - 32
-    elif memory_left_for_kv_cache_gb <= 16: approx_max_num_seqs = 256 # Default
-    elif memory_left_for_kv_cache_gb <= 24: approx_max_num_seqs = 288 # + 32
-    elif memory_left_for_kv_cache_gb <= 40: approx_max_num_seqs = 320 # + 32
-    elif memory_left_for_kv_cache_gb <= 48: approx_max_num_seqs = 226 # + 16
-    elif memory_left_for_kv_cache_gb <= 80: approx_max_num_seqs = 368 # + 32
+    if   approx_memory_left_for_kv_cache_gb <=  2: approx_max_num_seqs = 128 # - 32
+    elif approx_memory_left_for_kv_cache_gb <=  4: approx_max_num_seqs = 160 # - 32
+    elif approx_memory_left_for_kv_cache_gb <=  8: approx_max_num_seqs = 192 # - 32
+    elif approx_memory_left_for_kv_cache_gb <= 12: approx_max_num_seqs = 224 # - 32
+    elif approx_memory_left_for_kv_cache_gb <= 16: approx_max_num_seqs = 256 # Default
+    elif approx_memory_left_for_kv_cache_gb <= 24: approx_max_num_seqs = 288 # + 32
+    elif approx_memory_left_for_kv_cache_gb <= 40: approx_max_num_seqs = 320 # + 32
+    elif approx_memory_left_for_kv_cache_gb <= 48: approx_max_num_seqs = 226 # + 16
+    elif approx_memory_left_for_kv_cache_gb <= 80: approx_max_num_seqs = 368 # + 32
     else: approx_max_num_seqs = 400 # + 32
 
     # float8 KV cache can fit more sequences in 1 go so more throughput
-    if float8_kv_cache: approx_max_num_seqs = int(approx_max_num_seqs * 1.05)
+    if kv_cache_dtype.startswith("fp8"): 
+        approx_max_num_seqs = int(approx_max_num_seqs * 1.05)
 
     # vLLM default max_num_batched_tokens is 2048
     chunked_prefill_tokens = 2048
-    if   memory_left_for_kv_cache_gb <=  8: chunked_prefill_tokens = 1024 # + 0
-    elif memory_left_for_kv_cache_gb <= 12: chunked_prefill_tokens = 1536 # + 512
-    elif memory_left_for_kv_cache_gb <= 16: chunked_prefill_tokens = 2048 # + 512
-    elif memory_left_for_kv_cache_gb <= 24: chunked_prefill_tokens = 3072 # + 1024
-    elif memory_left_for_kv_cache_gb <= 40: chunked_prefill_tokens = 4096 # + 1024
-    elif memory_left_for_kv_cache_gb <= 48: chunked_prefill_tokens = 4608 # + 512
-    elif memory_left_for_kv_cache_gb <= 80: chunked_prefill_tokens = 8192 # + 4096
+    if   approx_memory_left_for_kv_cache_gb <=  8: chunked_prefill_tokens = 1024 # + 0
+    elif approx_memory_left_for_kv_cache_gb <= 12: chunked_prefill_tokens = 1536 # + 512
+    elif approx_memory_left_for_kv_cache_gb <= 16: chunked_prefill_tokens = 2048 # + 512
+    elif approx_memory_left_for_kv_cache_gb <= 24: chunked_prefill_tokens = 3072 # + 1024
+    elif approx_memory_left_for_kv_cache_gb <= 40: chunked_prefill_tokens = 4096 # + 1024
+    elif approx_memory_left_for_kv_cache_gb <= 48: chunked_prefill_tokens = 4608 # + 512
+    elif approx_memory_left_for_kv_cache_gb <= 80: chunked_prefill_tokens = 8192 # + 4096
     else: chunked_prefill_tokens = 8192 # + 0
 
     # vLLM errors out from max_seq_length (2048) being bigger than chunked_prefill_tokens (1024)
@@ -975,10 +1120,10 @@ def load_vllm(
     else: swap_space = 6
 
     print(
-        f"Unsloth: vLLM loading {model_name} with actual GPU utilization = {round(actual_gpu_memory_utilization*100, 2)}%\n"\
-        f"Unsloth: Your GPU has CUDA compute capability {major_version}.{minor_version} with VRAM = {total_memory_gb} GB.\n"\
-        f"Unsloth: Using conservativeness = {conservativeness}. Chunked prefill tokens = {chunked_prefill_tokens}. Num Sequences = {approx_max_num_seqs}.\n"\
-        f"Unsloth: vLLM's KV Cache can use up to {round(memory_left_for_kv_cache_gb, 2)} GB. Also swap space = {swap_space} GB."
+        f"MoERL: vLLM loading {model_name} with actual GPU utilization = {round(approx_gpu_memory_utilization_for_vllm*100, 2)}%\n"\
+        f"MoERL: Your GPU has CUDA compute capability {major_version}.{minor_version} with VRAM = {total_memory_gb} GB.\n"\
+        f"MoERL: Using conservativeness = {conservativeness}. Chunked prefill tokens = {chunked_prefill_tokens}. Num Sequences = {approx_max_num_seqs}.\n"\
+        f"MoERL: vLLM's KV Cache can use up to {round(approx_memory_left_for_kv_cache_gb, 2)} GB. Also swap space = {swap_space} GB."
     )
 
     # Get device as well
@@ -986,11 +1131,11 @@ def load_vllm(
 
     engine_args = dict(
         model                  = model_name,
-        gpu_memory_utilization = actual_gpu_memory_utilization,
+        gpu_memory_utilization = approx_gpu_memory_utilization_for_vllm,
         max_model_len          = max_seq_length,
         quantization           = "bitsandbytes" if use_bitsandbytes else None,
         load_format            = "bitsandbytes" if use_bitsandbytes else "auto",
-        kv_cache_dtype         = "fp8" if float8_kv_cache else "auto",
+        kv_cache_dtype         = kv_cache_dtype,
         dtype                  = dtype,
 
         max_num_batched_tokens = chunked_prefill_tokens, # Max tokens for chunked prefill default 2048
@@ -1017,7 +1162,7 @@ def load_vllm(
     for key in old_keys:
         if key not in good_keys:
             del engine_args[key]
-            print(f"Unsloth: Not an error, but `{key}` is not supported in vLLM. Skipping.")
+            print(f"MoERL: Not an error, but `{key}` is not supported in vLLM. Skipping.")
         pass
     pass
 
@@ -1049,7 +1194,7 @@ def load_vllm(
                 engine_args["max_num_seqs"] = approx_max_num_seqs
                 engine_args["gpu_memory_utilization"] *= 0.85
                 print(
-                    f"Unsloth: Retrying vLLM to process {approx_max_num_seqs} sequences and {max_num_batched_tokens} tokens in tandem.\n"\
+                    f"MoERL: Retrying vLLM to process {approx_max_num_seqs} sequences and {max_num_batched_tokens} tokens in tandem.\n"\
                     f"Error:\n{error}"
                 )
             else:
