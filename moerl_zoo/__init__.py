@@ -1,5 +1,9 @@
-# Unsloth Zoo - Utilities for Unsloth
-# Copyright 2023-present Daniel Han-Chen, Michael Han-Chen & the Unsloth team. All rights reserved.
+# MoERL Zoo - Utilities for MoERL
+# Originally from: Unsloth Zoo - Utilities for Unsloth
+# Copyright 2023-present Daniel Han-Chen, Michael Han-Chen & the Unsloth team.
+# Modifications copyright 2025-present MoERL Team. All rights reserved.
+#
+# SPDX-License-Identifier: LGPL-3.0-or-later
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as published by
@@ -13,25 +17,25 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# MoERL-specific changes:
+# - Renamed Unsloth references to MoERL
+# - Added dependency checks for MoERL-specific packages
 
-__version__ = "2025.3.17"
+
+__version__ = "2025.4.2"
 
 from importlib.util import find_spec
-if find_spec("unsloth") is None:
-    raise ImportError("Please install Unsloth via `pip install unsloth`!")
+if find_spec("moerl") is None:
+    raise ImportError("Please install MoERL via `pip install moerl`!")
 pass
 del find_spec
 
 import os
-if not ("UNSLOTH_IS_PRESENT" in os.environ):
-    raise ImportError("Please install Unsloth via `pip install unsloth`!")
+if not ("MOERL_IS_PRESENT" in os.environ):
+    raise ImportError("Please install MoERL via `pip install moerl`!")
 pass
 
-try:
-    print("🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.")
-except:
-    print("Unsloth: Will patch your computer to enable 2x faster free finetuning.")
-pass
-# Log Unsloth-Zoo Utilities
-os.environ["UNSLOTH_ZOO_IS_PRESENT"] = "1"
+# Log MoERL-Zoo Utilities
+os.environ["MOERL_ZOO_IS_PRESENT"] = "1"
 del os

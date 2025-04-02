@@ -3,28 +3,35 @@ requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "unsloth_zoo"
+name = "moerl_zoo"
 dynamic = ["version"]
-description = "Utils for Unsloth"
+description = "Utilities and patches for MoERL — an efficient Mixture of Experts RL fine-tuning framework"
 readme = "README.md"
 requires-python = ">=3.9,<3.13"
 license = "LGPL-3.0-or-later"
-keywords = ["ai", "llm",]
+keywords = ["llm", "moe", "reinforcement-learning", "ai", "finetune",]
 authors = [
-    {email = "info@unsloth.ai"},
-    {name = "Unsloth AI team"},
+    {email = "basicv8vc@gmail.com"},
+    {name = "slowfastai team"},
 ]
 maintainers = [
-    {name = "Daniel Han", email = "danielhanchen@gmail.com"},
-    {name = "Michael Han", email = "info@unsloth.ai"},
+    {name = "Jia", email = "basicv8vc@gmail.com"},
 ]
 classifiers = [
-    "Programming Language :: Python",
+  "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux"
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 dependencies = [
     "torch",
     "triton ; platform_system == 'Linux'",
-    "triton_windows ; platform_system == 'Windows'",
     "packaging>=24.1",
     "tyro",
     "transformers>=4.46.1,!=4.47.0",
@@ -46,7 +53,7 @@ dependencies = [
 ]
 
 [tool.setuptools.dynamic]
-version = {attr = "unsloth_zoo.__init__.__version__"}
+version = {attr = "moerl_zoo.__init__.__version__"}
 
 [tool.setuptools]
 include-package-data = false
@@ -55,6 +62,5 @@ include-package-data = false
 exclude = ["images*"]
 
 [project.urls]
-homepage = "http://www.unsloth.ai"
-documentation = "https://github.com/unslothai/unsloth"
-repository = "https://github.com/unslothai/unsloth"
+homepage = "https://github.com/slowfastai/moerl"
+repository = "https://github.com/slowfastai/moerl"

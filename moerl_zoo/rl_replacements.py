@@ -1,5 +1,9 @@
-# Unsloth Zoo - Utilities for Unsloth
-# Copyright 2023-present Daniel Han-Chen, Michael Han-Chen & the Unsloth team. All rights reserved.
+# MoERL Zoo - Utilities for MoERL
+# Originally from: Unsloth Zoo - Utilities for Unsloth
+# Copyright 2023-present Daniel Han-Chen, Michael Han-Chen & the Unsloth team.
+# Modifications copyright 2025-present MoERL Team. All rights reserved.
+#
+# SPDX-License-Identifier: LGPL-3.0-or-later
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as published by
@@ -13,6 +17,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 
 __all__ = [
     "RL_REPLACEMENTS"
